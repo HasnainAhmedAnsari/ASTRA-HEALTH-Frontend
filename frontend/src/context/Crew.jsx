@@ -1,72 +1,124 @@
+
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
-import api, { session } from '../services/api'
+import api from '../services/api'
 
 const CrewContext = createContext(null)
 export const useCrew = () => useContext(CrewContext)
 
 const remember = {
-  get: () => { try { return localStorage.getItem('astra.astronaut') } catch { return null } },
-  set: (v) => { try { localStorage.setItem('astra.astronaut', v) } catch { /* storage unavailable */ } },
+  get: () => {
+    try { return localStorage.getItem('astra.astronaut') }
+    catch { return null }
+  },
+  set: (value) => {
+    try { localStorage.setItem('astra.astronaut', value) }
+    catch { /* storage unavailable */ }
+  },
 }
 
 export function CrewProvider({ children }) {
-  const [user, setUser] = useState(null)
-  const [authReady, setAuthReady] = useState(false)
   const [crew, setCrew] = useState([])
   const [selectedId, setSelectedId] = useState(null)
-  const [online, setOnline] = useState(null)   // null = checking
-  const [version, setVersion] = useState(0)    // bump to make pages refetch
+  const [online, setOnline] = useState(null)
+  const [version, setVersion] = useState(0)
 
   const loadCrew = useCallback(async () => {
     try {
       const list = await api.astronauts()
-      setCrew(list)
+      setCrew(Array.isArray(list) ? list : [])
       setOnline(true)
-      setSelectedId((cur) => {
-        const saved = cur || remember.get()
-        return list.some((a) => a.id === saved) ? saved : list[0]?.id ?? null
+
+      setSelectedId((current) => {
+        const saved = current || remember.get()
+        const match = list.find((a) => String(a.id) === String(saved))
+        const nextId = match?.id ?? null
+        if (nextId !== null) remember.set(String(nextId))
+        return nextId === null ? null : String(nextId)
       })
-    } catch {
+    } catch (error) {
+      console.error('Could not load astronauts:', error)
       setOnline(false)
     }
   }, [])
 
-  // restore the session on page load
   useEffect(() => {
-    session.onExpired = () => { setUser(null); setCrew([]); setSelectedId(null) }
-    if (!session.token) { setAuthReady(true); api.health().then(() => setOnline(true)).catch(() => setOnline(false)); return }
-    api.me().then(setUser).catch((e) => { if (!e.response) setOnline(false); session.set(null) }).finally(() => setAuthReady(true))
-  }, [])
-  useEffect(() => { if (user) loadCrew() }, [user, loadCrew])
+    loadCrew()
+  }, [loadCrew])
 
-  const signIn = ({ access_token, user: u }) => { session.set(access_token); setOnline(true); setUser(u) }
-  const signOut = () => { session.set(null); setUser(null); setCrew([]); setSelectedId(null) }
-  const isStaff = user?.role === 'flight_surgeon' || user?.role === 'admin'
+  const select = (id) => {
+    const value = String(id)
+    remember.set(value)
+    setSelectedId(value)
+  }
 
-  const select = (id) => { remember.set(id); setSelectedId(id) }
-  const refresh = () => { setVersion((v) => v + 1); loadCrew() }
-  const astronaut = crew.find((a) => a.id === selectedId) || null
+  const refresh = () => {
+    setVersion((value) => value + 1)
+    loadCrew()
+  }
+
+  const astronaut =
+    crew.find((a) => String(a.id) === String(selectedId)) || null
 
   return (
-    <CrewContext.Provider value={{ crew, astronaut, selectedId, select, refresh, version, online, user, authReady, signIn, signOut, isStaff }}>
+    <CrewContext.Provider
+      value={{
+        crew,
+        astronaut,
+        selectedId,
+        select,
+        refresh,
+        version,
+        online,
+        user: astronaut,
+        authReady: online !== null,
+        isStaff: false,
+        signOut: () => {
+          setSelectedId(null)
+          try { localStorage.removeItem('astra.astronaut') }
+          catch { /* ignore */ }
+        },
+      }}
+    >
       {children}
     </CrewContext.Provider>
   )
 }
 
-/** Fetch helper: reruns when the astronaut changes or data is refreshed. */
+/** Fetch data again when the selected astronaut changes or data is refreshed. */
 export function useAstronautData(fetcher, deps = []) {
   const { selectedId, version } = useCrew()
-  const [state, setState] = useState({ data: null, loading: true, error: null })
+  const [state, setState] = useState({
+    data: null,
+    loading: true,
+    error: null,
+  })
+
   useEffect(() => {
-    if (!selectedId) return
+    if (!selectedId) {
+      setState({ data: null, loading: false, error: null })
+      return
+    }
+
     let alive = true
-    setState((s) => ({ ...s, loading: true, error: null }))
+    setState((current) => ({ ...current, loading: true, error: null }))
+
     fetcher(selectedId)
-      .then((data) => alive && setState({ data, loading: false, error: null }))
-      .catch((e) => alive && setState({ data: null, loading: false, error: e?.response?.data?.detail || e.message }))
+      .then((data) => {
+        if (alive) setState({ data, loading: false, error: null })
+      })
+      .catch((error) => {
+        if (alive) {
+          setState({
+            data: null,
+            loading: false,
+            error: error?.response?.data?.detail || error.message,
+          })
+        }
+      })
+
     return () => { alive = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, version, ...deps])
+
   return state
 }
